@@ -1,5 +1,10 @@
 package com.example.carscanner
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -32,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     @Volatile private var liveRunning = false
+    private var boundNetwork: Network? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -64,27 +70,68 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Forces the connection through the WiFi network even if it has
+     * "no internet" (which is normal for OBD2 WiFi adapters). Without
+     * this, Android may route the socket through mobile data instead,
+     * which makes the connection fail even though WiFi is connected.
+     */
+    private fun bindToWifiNetwork(onReady: (Network?) -> Unit) {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+
+        cm.requestNetwork(request, object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                boundNetwork = network
+                cm.bindProcessToNetwork(network)
+                onReady(network)
+            }
+
+            override fun onUnavailable() {
+                onReady(null)
+            }
+        })
+
+        // Fallback in case callback doesn't fire quickly
+        mainHandler.postDelayed({
+            if (boundNetwork == null) onReady(null)
+        }, 3000)
+    }
+
     private fun connect() {
         val ip = etIp.text.toString().trim()
         val port = etPort.text.toString().trim().toIntOrNull() ?: 35000
 
         tvStatus.text = "Status: Qoşulur..."
-        executor.execute {
-            try {
-                val c = Elm327WifiClient(ip, port)
-                c.connect()
-                client = c
-                mainHandler.post {
-                    tvStatus.text = "Status: Qoşuldu ($ip:$port)"
-                    Toast.makeText(this, "Adapterə qoşuldu", Toast.LENGTH_SHORT).show()
+        log("WiFi şəbəkəsinə bağlanılır...")
+
+        bindToWifiNetwork { network ->
+            if (network == null) {
+                log("Xəbərdarlıq: WiFi şəbəkəsi tapılmadı, mövcud şəbəkə ilə davam edilir.")
+            } else {
+                log("OBD WiFi şəbəkəsinə bağlandı.")
+            }
+
+            executor.execute {
+                try {
+                    val c = Elm327WifiClient(ip, port)
+                    c.connect()
+                    client = c
+                    mainHandler.post {
+                        tvStatus.text = "Status: Qoşuldu ($ip:$port)"
+                        Toast.makeText(this, "Adapterə qoşuldu", Toast.LENGTH_SHORT).show()
+                    }
+                    log("Qoşuldu: $ip:$port")
+                } catch (e: Exception) {
+                    mainHandler.post {
+                        tvStatus.text = "Status: Xəta"
+                        Toast.makeText(this, "Qoşulma xətası: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
+                    log("Qoşulma xətası: ${e.message}")
                 }
-                log("Qoşuldu: $ip:$port")
-            } catch (e: Exception) {
-                mainHandler.post {
-                    tvStatus.text = "Status: Xəta"
-                    Toast.makeText(this, "Qoşulma xətası: ${e.message}", Toast.LENGTH_LONG).show()
-                }
-                log("Qoşulma xətası: ${e.message}")
             }
         }
     }
